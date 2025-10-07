@@ -1,255 +1,290 @@
-import math
-import random
-import sys
-import os
-
-import neat
 import pygame
+import time
+import math
+from utils import scale_image, blit_rotate_center, blit_text_center
+pygame.font.init()
+
+GRASS = scale_image(pygame.image.load("imgs/grass.jpg"), 2.5)
+TRACK = scale_image(pygame.image.load("imgs/track.png"), 0.9)
+
+TRACK_BORDER = scale_image(pygame.image.load("imgs/track-border.png"), 0.9)
+TRACK_BORDER_MASK = pygame.mask.from_surface(TRACK_BORDER)
+
+FINISH = pygame.image.load("imgs/finish.png")
+FINISH_MASK = pygame.mask.from_surface(FINISH)
+FINISH_POSITION = (130, 250)
+
+RED_CAR = scale_image(pygame.image.load("imgs/red-car.png"), 0.55)
+GREEN_CAR = scale_image(pygame.image.load("imgs/green-car.png"), 0.55)
+
+WIDTH, HEIGHT = TRACK.get_width(), TRACK.get_height()
+WIN = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("Racing Game!")
+
+MAIN_FONT = pygame.font.SysFont("comicsans", 44)
+
+FPS = 60
+PATH = [(175, 119), (110, 70), (56, 133), (70, 481), (318, 731), (404, 680), (418, 521), (507, 475), (600, 551), (613, 715), (736, 713),
+        (734, 399), (611, 357), (409, 343), (433, 257), (697, 258), (738, 123), (581, 71), (303, 78), (275, 377), (176, 388), (178, 260)]
 
 
-WIDTH = 1600
-HEIGHT = 800
+class GameInfo:
+    LEVELS = 10
 
-CAR_SIZE_X = 50   
-CAR_SIZE_Y = 50
+    def __init__(self, level=1):
+        self.level = level
+        self.started = False
+        self.level_start_time = 0
 
-BORDER_COLOR = (255, 255, 255, 255) # Color To Crash on Hit
+    def next_level(self):
+        self.level += 1
+        self.started = False
 
-current_generation = 0 # Generation counter
+    def reset(self):
+        self.level = 1
+        self.started = False
+        self.level_start_time = 0
 
-class Car:
+    def game_finished(self):
+        return self.level > self.LEVELS
 
-    def __init__(self):
-        # Load Car Sprite and Rotate
-        self.sprite = pygame.image.load('car.png').convert() # Convert Speeds Up A Lot
-        self.sprite = pygame.transform.scale(self.sprite, (CAR_SIZE_X, CAR_SIZE_Y))
-        self.rotated_sprite = self.sprite 
+    def start_level(self):
+        self.started = True
+        self.level_start_time = time.time()
 
-        # self.position = [690, 740] # Starting Position
-        self.position = [830, 920] # Starting Position
+    def get_level_time(self):
+        if not self.started:
+            return 0
+        return round(time.time() - self.level_start_time)
+
+
+class AbstractCar:
+    def __init__(self, max_vel, rotation_vel):
+        self.img = self.IMG
+        self.max_vel = max_vel
+        self.vel = 0
+        self.rotation_vel = rotation_vel
         self.angle = 0
-        self.speed = 0
+        self.x, self.y = self.START_POS
+        self.acceleration = 0.1
 
-        self.speed_set = False # Flag For Default Speed Later on
+    def rotate(self, left=False, right=False):
+        if left:
+            self.angle += self.rotation_vel
+        elif right:
+            self.angle -= self.rotation_vel
 
-        self.center = [self.position[0] + CAR_SIZE_X / 2, self.position[1] + CAR_SIZE_Y / 2] # Calculate Center
+    def draw(self, win):
+        blit_rotate_center(win, self.img, (self.x, self.y), self.angle)
 
-        self.radars = [] # List For Sensors / Radars
-        self.drawing_radars = [] # Radars To Be Drawn
+    def move_forward(self):
+        self.vel = min(self.vel + self.acceleration, self.max_vel)
+        self.move()
 
-        self.alive = True # Boolean To Check If Car is Crashed
+    def move_backward(self):
+        self.vel = max(self.vel - self.acceleration, -self.max_vel/2)
+        self.move()
 
-        self.distance = 0 # Distance Driven
-        self.time = 0 # Time Passed
+    def move(self):
+        radians = math.radians(self.angle)
+        vertical = math.cos(radians) * self.vel
+        horizontal = math.sin(radians) * self.vel
 
-    def draw(self, screen):
-        screen.blit(self.rotated_sprite, self.position) # Draw Sprite
-        self.draw_radar(screen) #OPTIONAL FOR SENSORS
+        self.y -= vertical
+        self.x -= horizontal
 
-    def draw_radar(self, screen):
-        # Optionally Draw All Sensors / Radars
-        for radar in self.radars:
-            position = radar[0]
-            pygame.draw.line(screen, (0, 255, 0), self.center, position, 1)
-            pygame.draw.circle(screen, (0, 255, 0), position, 5)
+    def collide(self, mask, x=0, y=0):
+        car_mask = pygame.mask.from_surface(self.img)
+        offset = (int(self.x - x), int(self.y - y))
+        poi = mask.overlap(car_mask, offset)
+        return poi
 
-    def check_collision(self, game_map):
-        self.alive = True
-        for point in self.corners:
-            # If Any Corner Touches Border Color -> Crash
-            # Assumes Rectangle
-            if game_map.get_at((int(point[0]), int(point[1]))) == BORDER_COLOR:
-                self.alive = False
-                break
-
-    def check_radar(self, degree, game_map):
-        length = 0
-        x = int(self.center[0] + math.cos(math.radians(360 - (self.angle + degree))) * length)
-        y = int(self.center[1] + math.sin(math.radians(360 - (self.angle + degree))) * length)
-
-        # While We Don't Hit BORDER_COLOR AND length < 300 (just a max) -> go further and further
-        while not game_map.get_at((x, y)) == BORDER_COLOR and length < 300:
-            length = length + 1
-            x = int(self.center[0] + math.cos(math.radians(360 - (self.angle + degree))) * length)
-            y = int(self.center[1] + math.sin(math.radians(360 - (self.angle + degree))) * length)
-
-        # Calculate Distance To Border And Append To Radars List
-        dist = int(math.sqrt(math.pow(x - self.center[0], 2) + math.pow(y - self.center[1], 2)))
-        self.radars.append([(x, y), dist])
-    
-    def update(self, game_map):
-        # Set The Speed To 20 For The First Time
-        # Only When Having 4 Output Nodes With Speed Up and Down
-        if not self.speed_set:
-            self.speed = 20
-            self.speed_set = True
-
-        # Get Rotated Sprite And Move Into The Right X-Direction
-        # Don't Let The Car Go Closer Than 20px To The Edge
-        self.rotated_sprite = self.rotate_center(self.sprite, self.angle)
-        self.position[0] += math.cos(math.radians(360 - self.angle)) * self.speed
-        self.position[0] = max(self.position[0], 20)
-        self.position[0] = min(self.position[0], WIDTH - 120)
-
-        # Increase Distance and Time
-        self.distance += self.speed
-        self.time += 1
-        
-        # Same For Y-Position
-        self.position[1] += math.sin(math.radians(360 - self.angle)) * self.speed
-        self.position[1] = max(self.position[1], 20)
-        self.position[1] = min(self.position[1], WIDTH - 120)
-
-        # Calculate New Center
-        self.center = [int(self.position[0]) + CAR_SIZE_X / 2, int(self.position[1]) + CAR_SIZE_Y / 2]
-
-        # Calculate Four Corners
-        # Length Is Half The Side
-        length = 0.5 * CAR_SIZE_X
-        left_top = [self.center[0] + math.cos(math.radians(360 - (self.angle + 30))) * length, self.center[1] + math.sin(math.radians(360 - (self.angle + 30))) * length]
-        right_top = [self.center[0] + math.cos(math.radians(360 - (self.angle + 150))) * length, self.center[1] + math.sin(math.radians(360 - (self.angle + 150))) * length]
-        left_bottom = [self.center[0] + math.cos(math.radians(360 - (self.angle + 210))) * length, self.center[1] + math.sin(math.radians(360 - (self.angle + 210))) * length]
-        right_bottom = [self.center[0] + math.cos(math.radians(360 - (self.angle + 330))) * length, self.center[1] + math.sin(math.radians(360 - (self.angle + 330))) * length]
-        self.corners = [left_top, right_top, left_bottom, right_bottom]
-
-        # Check Collisions And Clear Radars
-        self.check_collision(game_map)
-        self.radars.clear()
-
-        # From -90 To 120 With Step-Size 45 Check Radar
-        for d in range(-90, 120, 45):
-            self.check_radar(d, game_map)
-
-    def get_data(self):
-        # Get Distances To Border
-        radars = self.radars
-        return_values = [0, 0, 0, 0, 0]
-        for i, radar in enumerate(radars):
-            return_values[i] = int(radar[1] / 30)
-
-        return return_values
-
-    def is_alive(self):
-        # Basic Alive Function
-        return self.alive
-
-    def get_reward(self):
-        # Calculate Reward (Maybe Change?)
-        # return self.distance / 50.0
-        return self.distance / (CAR_SIZE_X / 2)
-
-    def rotate_center(self, image, angle):
-        # Rotate The Rectangle
-        rectangle = image.get_rect()
-        rotated_image = pygame.transform.rotate(image, angle)
-        rotated_rectangle = rectangle.copy()
-        rotated_rectangle.center = rotated_image.get_rect().center
-        rotated_image = rotated_image.subsurface(rotated_rectangle).copy()
-        return rotated_image
+    def reset(self):
+        self.x, self.y = self.START_POS
+        self.angle = 0
+        self.vel = 0
 
 
-def run_simulation(genomes, config):
-    
-    # Empty Collections For Nets and Cars
-    nets = []
-    cars = []
+class PlayerCar(AbstractCar):
+    IMG = RED_CAR
+    START_POS = (180, 200)
 
-    # Initialize PyGame And The Display
-    pygame.init()
-    screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.FULLSCREEN)
+    def reduce_speed(self):
+        self.vel = max(self.vel - self.acceleration / 2, 0)
+        self.move()
 
-    # For All Genomes Passed Create A New Neural Network
-    for i, g in genomes:
-        net = neat.nn.FeedForwardNetwork.create(g, config)
-        nets.append(net)
-        g.fitness = 0
+    def bounce(self):
+        self.vel = -self.vel
+        self.move()
 
-        cars.append(Car())
 
-    # Clock Settings
-    # Font Settings & Loading Map
-    clock = pygame.time.Clock()
-    generation_font = pygame.font.SysFont("Arial", 30)
-    alive_font = pygame.font.SysFont("Arial", 20)
-    game_map = pygame.image.load('map.png').convert() # Convert Speeds Up A Lot
+class ComputerCar(AbstractCar):
+    IMG = GREEN_CAR
+    START_POS = (150, 200)
 
-    global current_generation
-    current_generation += 1
+    def __init__(self, max_vel, rotation_vel, path=[]):
+        super().__init__(max_vel, rotation_vel)
+        self.path = path
+        self.current_point = 0
+        self.vel = max_vel
 
-    # Simple Counter To Roughly Limit Time (Not Good Practice)
-    counter = 0
+    def draw_points(self, win):
+        for point in self.path:
+            pygame.draw.circle(win, (255, 0, 0), point, 5)
 
-    while True:
-        # Exit On Quit Event
+    def draw(self, win):
+        super().draw(win)
+        # self.draw_points(win)
+
+    def calculate_angle(self):
+        target_x, target_y = self.path[self.current_point]
+        x_diff = target_x - self.x
+        y_diff = target_y - self.y
+
+        if y_diff == 0:
+            desired_radian_angle = math.pi / 2
+        else:
+            desired_radian_angle = math.atan(x_diff / y_diff)
+
+        if target_y > self.y:
+            desired_radian_angle += math.pi
+
+        difference_in_angle = self.angle - math.degrees(desired_radian_angle)
+        if difference_in_angle >= 180:
+            difference_in_angle -= 360
+
+        if difference_in_angle > 0:
+            self.angle -= min(self.rotation_vel, abs(difference_in_angle))
+        else:
+            self.angle += min(self.rotation_vel, abs(difference_in_angle))
+
+    def update_path_point(self):
+        target = self.path[self.current_point]
+        rect = pygame.Rect(
+            self.x, self.y, self.img.get_width(), self.img.get_height())
+        if rect.collidepoint(*target):
+            self.current_point += 1
+
+    def move(self):
+        if self.current_point >= len(self.path):
+            return
+
+        self.calculate_angle()
+        self.update_path_point()
+        super().move()
+
+    def next_level(self, level):
+        self.reset()
+        self.vel = self.max_vel + (level - 1) * 0.2
+        self.current_point = 0
+
+
+def draw(win, images, player_car, computer_car, game_info):
+    for img, pos in images:
+        win.blit(img, pos)
+
+    level_text = MAIN_FONT.render(
+        f"Level {game_info.level}", 1, (255, 255, 255))
+    win.blit(level_text, (10, HEIGHT - level_text.get_height() - 70))
+
+    time_text = MAIN_FONT.render(
+        f"Time: {game_info.get_level_time()}s", 1, (255, 255, 255))
+    win.blit(time_text, (10, HEIGHT - time_text.get_height() - 40))
+
+    vel_text = MAIN_FONT.render(
+        f"Vel: {round(player_car.vel, 1)}px/s", 1, (255, 255, 255))
+    win.blit(vel_text, (10, HEIGHT - vel_text.get_height() - 10))
+
+    player_car.draw(win)
+    computer_car.draw(win)
+    pygame.display.update()
+
+
+def move_player(player_car):
+    keys = pygame.key.get_pressed()
+    moved = False
+
+    if keys[pygame.K_a]:
+        player_car.rotate(left=True)
+    if keys[pygame.K_d]:
+        player_car.rotate(right=True)
+    if keys[pygame.K_w]:
+        moved = True
+        player_car.move_forward()
+    if keys[pygame.K_s]:
+        moved = True
+        player_car.move_backward()
+
+    if not moved:
+        player_car.reduce_speed()
+
+
+def handle_collision(player_car, computer_car, game_info):
+    if player_car.collide(TRACK_BORDER_MASK) != None:
+        player_car.bounce()
+
+    computer_finish_poi_collide = computer_car.collide(
+        FINISH_MASK, *FINISH_POSITION)
+    if computer_finish_poi_collide != None:
+        blit_text_center(WIN, MAIN_FONT, "You lost!")
+        pygame.display.update()
+        pygame.time.wait(5000)
+        game_info.reset()
+        player_car.reset()
+        computer_car.reset()
+
+    player_finish_poi_collide = player_car.collide(
+        FINISH_MASK, *FINISH_POSITION)
+    if player_finish_poi_collide != None:
+        if player_finish_poi_collide[1] == 0:
+            player_car.bounce()
+        else:
+            game_info.next_level()
+            player_car.reset()
+            computer_car.next_level(game_info.level)
+
+
+run = True
+clock = pygame.time.Clock()
+images = [(GRASS, (0, 0)), (TRACK, (0, 0)),
+          (FINISH, FINISH_POSITION), (TRACK_BORDER, (0, 0))]
+player_car = PlayerCar(4, 4)
+computer_car = ComputerCar(2, 4, PATH)
+game_info = GameInfo()
+
+while run:
+    clock.tick(FPS)
+
+    draw(WIN, images, player_car, computer_car, game_info)
+
+    while not game_info.started:
+        blit_text_center(
+            WIN, MAIN_FONT, f"Press any key to start level {game_info.level}!")
+        pygame.display.update()
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
-                sys.exit(0)
+                pygame.quit()
+                break
 
-        # For Each Car Get The Acton It Takes
-        for i, car in enumerate(cars):
-            output = nets[i].activate(car.get_data())
-            choice = output.index(max(output))
-            if choice == 0:
-                car.angle += 10 # Left
-            elif choice == 1:
-                car.angle -= 10 # Right
-            elif choice == 2:
-                if(car.speed - 2 >= 12):
-                    car.speed -= 2 # Slow Down
-            else:
-                car.speed += 2 # Speed Up
-        
-        # Check If Car Is Still Alive
-        # Increase Fitness If Yes And Break Loop If Not
-        still_alive = 0
-        for i, car in enumerate(cars):
-            if car.is_alive():
-                still_alive += 1
-                car.update(game_map)
-                genomes[i][1].fitness += car.get_reward()
+            if event.type == pygame.KEYDOWN:
+                game_info.start_level()
 
-        if still_alive == 0:
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            run = False
             break
 
-        counter += 1
-        if counter == 30 * 40: # Stop After About 20 Seconds
-            break
+    move_player(player_car)
+    computer_car.move()
 
-        # Draw Map And All Cars That Are Alive
-        screen.blit(game_map, (0, 0))
-        for car in cars:
-            if car.is_alive():
-                car.draw(screen)
-        
-        # Display Info
-        text = generation_font.render("Generation: " + str(current_generation), True, (0,0,0))
-        text_rect = text.get_rect()
-        text_rect.center = (900, 450)
-        screen.blit(text, text_rect)
+    handle_collision(player_car, computer_car, game_info)
 
-        text = alive_font.render("Still Alive: " + str(still_alive), True, (0, 0, 0))
-        text_rect = text.get_rect()
-        text_rect.center = (900, 490)
-        screen.blit(text, text_rect)
+    if game_info.game_finished():
+        blit_text_center(WIN, MAIN_FONT, "You won the game!")
+        pygame.time.wait(5000)
+        game_info.reset()
+        player_car.reset()
+        computer_car.reset()
 
-        pygame.display.flip()
-        clock.tick(60) # 60 FPS
 
-if __name__ == "__main__":
-    
-    # Load Config
-    config_path = "./config.txt"
-    config = neat.config.Config(neat.DefaultGenome,
-                                neat.DefaultReproduction,
-                                neat.DefaultSpeciesSet,
-                                neat.DefaultStagnation,
-                                config_path)
-
-    # Create Population And Add Reporters
-    population = neat.Population(config)
-    population.add_reporter(neat.StdOutReporter(True))
-    stats = neat.StatisticsReporter()
-    population.add_reporter(stats)
-    
-    # Run Simulation For A Maximum of 1000 Generations
-    population.run(run_simulation, 1000)
+pygame.quit()
